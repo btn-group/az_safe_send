@@ -14,6 +14,7 @@ pub enum AzSafeSendError {
     NotFound(String),
     PSP22Error(PSP22Error),
     RecordsLimitReached(String),
+    Unauthorised,
     UnprocessableEntity(String),
 }
 impl From<InkEnvError> for AzSafeSendError {
