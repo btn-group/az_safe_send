@@ -18,8 +18,11 @@ mod az_safe_send {
     // === EVENTS ===
     #[ink(event)]
     pub struct Create {
+        #[ink(topic)]
         id: u32,
+        #[ink(topic)]
         from: AccountId,
+        #[ink(topic)]
         to: AccountId,
         amount: Balance,
         token_address: Option<AccountId>,
@@ -27,7 +30,14 @@ mod az_safe_send {
     }
 
     #[ink(event)]
-    pub struct Cancelled {
+    pub struct Cancel {
+        #[ink(topic)]
+        id: u32,
+    }
+
+    #[ink(event)]
+    pub struct Collect {
+        #[ink(topic)]
         id: u32,
     }
 
@@ -136,7 +146,52 @@ mod az_safe_send {
             self.cheques.insert(cheque.id, &cheque);
 
             // emit event
-            Self::emit_event(self.env(), Event::Cancelled(Cancelled { id: cheque.id }));
+            Self::emit_event(self.env(), Event::Cancel(Cancel { id: cheque.id }));
+
+            Ok(cheque)
+        }
+
+        #[ink(message)]
+        pub fn collect(&mut self, id: u32) -> Result<Cheque> {
+            let mut cheque: Cheque = self.show(id)?;
+            let caller: AccountId = Self::env().caller();
+            if caller != cheque.to {
+                return Err(AzSafeSendError::Unauthorised);
+            }
+            if cheque.status != 0 {
+                return Err(AzSafeSendError::UnprocessableEntity(
+                    "Status must be pending collection.".to_string(),
+                ));
+            }
+
+            if let Some(token_address_unwrapped) = cheque.token_address {
+                // Transfer token to amount
+                PSP22Ref::transfer_builder(&token_address_unwrapped, caller, cheque.amount, vec![])
+                    .call_flags(CallFlags::default())
+                    .invoke()?;
+            } else if self.env().transfer(caller, cheque.amount).is_err() {
+                panic!(
+                    "requested transfer failed. this can be the case if the contract does not\
+                             have sufficient free funds or if the transfer would have brought the\
+                             contract's balance below minimum balance."
+                )
+            }
+
+            // transfer fee to admin
+            if cheque.fee > 0 && self.env().transfer(self.admin, cheque.fee).is_err() {
+                panic!(
+                    "requested transfer failed. this can be the case if the contract does not\
+                             have sufficient free funds or if the transfer would have brought the\
+                             contract's balance below minimum balance."
+                )
+            }
+
+            // set status
+            cheque.status = 1;
+            self.cheques.insert(cheque.id, &cheque);
+
+            // emit event
+            Self::emit_event(self.env(), Event::Collect(Collect { id: cheque.id }));
 
             Ok(cheque)
         }
@@ -347,6 +402,64 @@ mod az_safe_send {
             assert_eq!(cheque.status, 2);
         }
 
+        // This is for cheques without a token address attached to it
+        #[ink::test]
+        fn test_collect() {
+            let (accounts, mut az_safe_send) = init();
+            // when cheque doesn't exist
+            let mut result = az_safe_send.collect(1);
+            // * it raises an error
+            assert_eq!(result, Err(AzSafeSendError::NotFound("Cheque".to_string())));
+            // when cheque exists
+            ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(
+                MOCK_FEE + MOCK_AMOUNT,
+            );
+            let mut cheque: Cheque = az_safe_send
+                .create(accounts.bob, MOCK_AMOUNT, None)
+                .unwrap();
+            // = when cheque's to isn't the caller
+            // = * it raises an error
+            result = az_safe_send.collect(0);
+            assert_eq!(result, Err(AzSafeSendError::Unauthorised));
+            // = when cheque's to is the caller
+            set_caller::<DefaultEnvironment>(accounts.bob);
+            // == when cheque is collected
+            cheque.status = 1;
+            az_safe_send.cheques.insert(cheque.id, &cheque);
+            // == * it raises an error
+            result = az_safe_send.collect(0);
+            assert_eq!(
+                result,
+                Err(AzSafeSendError::UnprocessableEntity(
+                    "Status must be pending collection.".to_string()
+                ))
+            );
+            // == when cheque is cancelled
+            cheque.status = 2;
+            az_safe_send.cheques.insert(cheque.id, &cheque);
+            // == * it raises an error
+            result = az_safe_send.collect(0);
+            assert_eq!(
+                result,
+                Err(AzSafeSendError::UnprocessableEntity(
+                    "Status must be pending collection.".to_string()
+                ))
+            );
+            // == when cheque is pending
+            cheque.status = 0;
+            az_safe_send.cheques.insert(cheque.id, &cheque);
+            set_balance(accounts.bob, 1_000_000);
+            set_balance(accounts.alice, 1_000_000);
+            result = az_safe_send.collect(0);
+            let result_unwrapped = result.unwrap();
+            // == * it transfers the cheque amount to the caller
+            assert_eq!(get_balance(accounts.bob), 1_000_000 + cheque.amount);
+            // == * it transfers the fee to the admin
+            assert!(get_balance(accounts.alice) > 1_000_000);
+            // == * it sets the status to 1;
+            assert_eq!(result_unwrapped.status, 1);
+        }
+
         // Testing here when token address isn't provided
         // Testing with token address in e2e tests below
         #[ink::test]
@@ -426,6 +539,7 @@ mod az_safe_send {
         // === CONSTANTS ===
         const MOCK_AMOUNT: Balance = 250;
         const MOCK_FEE: Balance = 500;
+        const MOCK_SEND_AMOUNT: Balance = 5;
 
         // === TYPES ===
         type E2EResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -442,7 +556,6 @@ mod az_safe_send {
         async fn test_cancel(mut client: ::ink_e2e::Client<C, E>) -> E2EResult<()> {
             let alice_account_id: AccountId = account_id(ink_e2e::alice());
             let bob_account_id: AccountId = account_id(ink_e2e::bob());
-            let send_amount: Balance = 5;
 
             // Instantiate token
             let token_constructor = ButtonRef::new(
@@ -476,8 +589,10 @@ mod az_safe_send {
                 .call(&ink_e2e::alice(), increase_allowance_message, 0, None)
                 .await
                 .expect("increase allowance failed");
-            let create_message = build_message::<AzSafeSendRef>(safe_send_id.clone())
-                .call(|safe_send| safe_send.create(bob_account_id, send_amount, Some(token_id)));
+            let create_message =
+                build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id))
+                });
             client
                 .call(&ink_e2e::alice(), create_message, 1_000_000_000_000, None)
                 .await
@@ -504,11 +619,76 @@ mod az_safe_send {
             Ok(())
         }
 
+        // The primary reason is to test that when token address is present, token is sent to the collector
+        #[ink_e2e::test]
+        async fn test_collect(mut client: ::ink_e2e::Client<C, E>) -> E2EResult<()> {
+            let bob_account_id: AccountId = account_id(ink_e2e::bob());
+
+            // Instantiate token
+            let token_constructor = ButtonRef::new(
+                MOCK_AMOUNT,
+                Some("Button".to_string()),
+                Some("BTN".to_string()),
+                6,
+            );
+            let token_id: AccountId = client
+                .instantiate("az_button", &ink_e2e::alice(), token_constructor, 0, None)
+                .await
+                .expect("Reward token instantiate failed")
+                .account_id;
+            // Instantiate safe send smart contract
+            let safe_send_constructor = AzSafeSendRef::new(MOCK_FEE);
+            let safe_send_id: AccountId = client
+                .instantiate(
+                    "az_safe_send",
+                    &ink_e2e::alice(),
+                    safe_send_constructor,
+                    0,
+                    None,
+                )
+                .await
+                .expect("Safe send instantiate failed")
+                .account_id;
+            // when token address is supplied
+            // = when fee is correct
+            // == when user has provided allowance to contract to acquire token and has sufficient balance
+            let increase_allowance_message = build_message::<ButtonRef>(token_id.clone())
+                .call(|token| token.increase_allowance(safe_send_id, u128::MAX));
+            client
+                .call(&ink_e2e::alice(), increase_allowance_message, 0, None)
+                .await
+                .expect("increase allowance failed");
+            let create_message =
+                build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id))
+                });
+            client
+                .call(&ink_e2e::alice(), create_message, MOCK_FEE, None)
+                .await
+                .expect("create failed");
+            // === when called by the collector
+            let collect_message = build_message::<AzSafeSendRef>(safe_send_id.clone())
+                .call(|safe_send| safe_send.collect(0));
+            client
+                .call(&ink_e2e::bob(), collect_message, 0, None)
+                .await
+                .expect("create failed");
+            // == * it sends the amount of token to the collector
+            let balance_message = build_message::<ButtonRef>(token_id)
+                .call(|button| button.balance_of(bob_account_id));
+            let balance: Balance = client
+                .call_dry_run(&ink_e2e::alice(), &balance_message, 0, None)
+                .await
+                .return_value();
+            assert_eq!(MOCK_SEND_AMOUNT, balance);
+
+            Ok(())
+        }
+
         #[ink_e2e::test]
         async fn test_create(mut client: ::ink_e2e::Client<C, E>) -> E2EResult<()> {
             let alice_account_id: AccountId = account_id(ink_e2e::alice());
             let bob_account_id: AccountId = account_id(ink_e2e::bob());
-            let send_amount: Balance = 5;
 
             // Instantiate token
             let token_constructor = ButtonRef::new(
@@ -553,8 +733,10 @@ mod az_safe_send {
                 .call(&ink_e2e::alice(), increase_allowance_message, 0, None)
                 .await
                 .expect("increase allowance failed");
-            let create_message = build_message::<AzSafeSendRef>(safe_send_id.clone())
-                .call(|safe_send| safe_send.create(bob_account_id, send_amount, Some(token_id)));
+            let create_message =
+                build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id))
+                });
             client
                 .call(&ink_e2e::alice(), create_message, MOCK_FEE, None)
                 .await
@@ -566,7 +748,7 @@ mod az_safe_send {
                 .call_dry_run(&ink_e2e::alice(), &balance_message, 0, None)
                 .await
                 .return_value();
-            assert_eq!(send_amount, balance);
+            assert_eq!(MOCK_SEND_AMOUNT, balance);
             // == * it creates a new cheque with all the correct details
             let show_message =
                 build_message::<AzSafeSendRef>(safe_send_id).call(|safe_send| safe_send.show(0));
@@ -582,7 +764,7 @@ mod az_safe_send {
             // ==== * it stores the to
             assert_eq!(cheque.to, bob_account_id);
             // ==== * it stores the amount
-            assert_eq!(cheque.amount, send_amount);
+            assert_eq!(cheque.amount, MOCK_SEND_AMOUNT);
             // ==== * it sets the status to 0
             assert_eq!(cheque.status, 0);
             // ==== * it stores the submitted token_address
