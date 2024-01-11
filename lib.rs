@@ -41,6 +41,11 @@ mod az_safe_send {
         id: u32,
     }
 
+    #[ink(event)]
+    pub struct UpdateFee {
+        fee: Balance,
+    }
+
     // === STRUCTS ===
     #[derive(scale::Decode, scale::Encode, Debug, Clone, PartialEq)]
     #[cfg_attr(
@@ -265,6 +270,20 @@ mod az_safe_send {
             Ok(cheque)
         }
 
+        #[ink(message)]
+        pub fn update_fee(&mut self, fee: Balance) -> Result<()> {
+            if Self::env().caller() != self.admin {
+                return Err(AzSafeSendError::Unauthorised);
+            }
+
+            self.fee = fee;
+
+            // emit event
+            Self::emit_event(self.env(), Event::UpdateFee(UpdateFee { fee }));
+
+            Ok(())
+        }
+
         // === PRIVATE ===
         fn acquire_psp22(&self, token: AccountId, from: AccountId, amount: Balance) -> Result<()> {
             PSP22Ref::transfer_from_builder(&token, from, self.env().account_id(), amount, vec![])
@@ -329,7 +348,6 @@ mod az_safe_send {
         }
 
         // === TEST HANDLES ===
-
         #[ink::test]
         fn test_cancel() {
             let (accounts, mut az_safe_send) = init();
@@ -525,6 +543,22 @@ mod az_safe_send {
                 result,
                 Err(AzSafeSendError::RecordsLimitReached("Cheque".to_string()))
             );
+        }
+
+        #[ink::test]
+        fn test_update_fee() {
+            let (accounts, mut az_safe_send) = init();
+            // when called by non-admin
+            set_caller::<DefaultEnvironment>(accounts.bob);
+            // * it raises an error
+            let mut result = az_safe_send.update_fee(1);
+            assert_eq!(result, Err(AzSafeSendError::Unauthorised));
+            // when called by admin
+            set_caller::<DefaultEnvironment>(accounts.alice);
+            result = az_safe_send.update_fee(10);
+            assert!(result.is_ok());
+            // = * it updates the fee
+            assert_eq!(az_safe_send.fee, 10);
         }
     }
 
