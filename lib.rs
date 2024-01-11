@@ -122,7 +122,9 @@ mod az_safe_send {
                 self.acquire_psp22(token_address.unwrap(), caller, amount)?;
             } else {
                 // Check AZERO sent in equals fee + amount if no token_address
-                if self.env().transferred_value() != self.fee + amount {
+                if self.fee.checked_add(amount).is_none()
+                    || self.env().transferred_value() != self.fee + amount
+                {
                     return Err(AzSafeSendError::IncorrectFee);
                 }
             }
@@ -298,6 +300,10 @@ mod az_safe_send {
         // === TEST HANDLES ===
         #[ink_e2e::test]
         async fn test_create(mut client: ::ink_e2e::Client<C, E>) -> E2EResult<()> {
+            let alice_account_id: AccountId = account_id(ink_e2e::alice());
+            let bob_account_id: AccountId = account_id(ink_e2e::bob());
+            let send_amount: Balance = 5;
+
             // Instantiate token
             let token_constructor = ButtonRef::new(
                 MOCK_AMOUNT,
@@ -326,7 +332,6 @@ mod az_safe_send {
             // when token address is supplied
             // = when fee is incorrect
             // * it raises an error
-            let bob_account_id: AccountId = account_id(ink_e2e::bob());
             let create_message = build_message::<AzSafeSendRef>(safe_send_id)
                 .call(|safe_send| safe_send.create(bob_account_id, 1, Some(token_id)));
             let result = client
@@ -334,44 +339,6 @@ mod az_safe_send {
                 .await
                 .return_value();
             assert_eq!(result, Err(AzSafeSendError::IncorrectFee));
-
-            Ok(())
-        }
-
-        #[ink_e2e::test]
-        async fn test_create_two(mut client: ::ink_e2e::Client<C, E>) -> E2EResult<()> {
-            let alice_account_id: AccountId = account_id(ink_e2e::alice());
-            let bob_account_id: AccountId = account_id(ink_e2e::bob());
-            let send_amount: Balance = 5;
-
-            // Instantiate token
-            let token_constructor = ButtonRef::new(
-                MOCK_AMOUNT,
-                Some("Button".to_string()),
-                Some("BTN".to_string()),
-                6,
-            );
-            let token_id: AccountId = client
-                .instantiate("az_button", &ink_e2e::alice(), token_constructor, 0, None)
-                .await
-                .expect("Token instantiate failed")
-                .account_id;
-            // Instantiate safe send smart contract
-            let safe_send_constructor = AzSafeSendRef::new(MOCK_FEE);
-            let safe_send_id: AccountId = client
-                .instantiate(
-                    "az_safe_send",
-                    &ink_e2e::alice(),
-                    safe_send_constructor,
-                    0,
-                    None,
-                )
-                .await
-                .expect("Safe send instantiate failed")
-                .account_id;
-            // when token address is supplied
-            // = when fee is incorrect
-            // * it raises an error
             // = when fee is correct
             // == when user has provided allowance to contract to acquire token and has sufficient balance
             let increase_allowance_message = build_message::<ButtonRef>(token_id.clone())
@@ -393,7 +360,7 @@ mod az_safe_send {
                 .call_dry_run(&ink_e2e::alice(), &balance_message, 0, None)
                 .await
                 .return_value();
-            assert_eq!(1, balance);
+            assert_eq!(send_amount, balance);
             // == * it creates a new cheque with all the correct details
             let show_message =
                 build_message::<AzSafeSendRef>(safe_send_id).call(|safe_send| safe_send.show(0));
@@ -409,7 +376,7 @@ mod az_safe_send {
             // ==== * it stores the to
             assert_eq!(cheque.to, bob_account_id);
             // ==== * it stores the amount
-            assert_eq!(cheque.amount, 1);
+            assert_eq!(cheque.amount, send_amount);
             // ==== * it sets the status to 0
             assert_eq!(cheque.status, 0);
             // ==== * it stores the submitted token_address
