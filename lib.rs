@@ -6,8 +6,13 @@ mod errors;
 mod az_safe_send {
     use crate::errors::AzSafeSendError;
     use ink::{
-        codegen::EmitEvent, env::CallFlags, prelude::string::ToString, prelude::vec,
-        reflect::ContractEventBase, storage::Mapping,
+        codegen::EmitEvent,
+        env::call::{build_call, ExecutionInput, Selector},
+        env::CallFlags,
+        prelude::string::{String, ToString},
+        prelude::vec,
+        reflect::ContractEventBase,
+        storage::Mapping,
     };
     use openbrush::contracts::psp22::PSP22Ref;
 
@@ -68,6 +73,7 @@ mod az_safe_send {
         admin: AccountId,
         fee: Balance,
         cheques_total: u32,
+        azero_id_router_address: AccountId,
     }
 
     #[ink(storage)]
@@ -76,15 +82,17 @@ mod az_safe_send {
         admin: AccountId,
         cheques: Mapping<u32, Cheque>,
         cheques_total: u32,
+        azero_id_router_address: AccountId,
     }
     impl AzSafeSend {
         #[ink(constructor)]
-        pub fn new(fee: Balance) -> Self {
+        pub fn new(fee: Balance, azero_id_router_address: AccountId) -> Self {
             Self {
                 fee,
                 admin: Self::env().caller(),
                 cheques: Mapping::default(),
                 cheques_total: 0,
+                azero_id_router_address,
             }
         }
 
@@ -95,6 +103,7 @@ mod az_safe_send {
                 admin: self.admin,
                 fee: self.fee,
                 cheques_total: self.cheques_total,
+                azero_id_router_address: self.azero_id_router_address,
             }
         }
 
@@ -210,12 +219,16 @@ mod az_safe_send {
             to: AccountId,
             amount: Balance,
             token_address: Option<AccountId>,
+            azero_id: Option<String>,
         ) -> Result<Cheque> {
             let caller: AccountId = Self::env().caller();
             if caller == to {
                 return Err(AzSafeSendError::UnprocessableEntity(
                     "Sender and receiver must be different.".to_string(),
                 ));
+            }
+            if let Some(azero_id_unwrapped) = azero_id {
+                self.validate_ownership_of_azero_id(azero_id_unwrapped, to)?;
             }
             if amount == 0 {
                 return Err(AzSafeSendError::UnprocessableEntity(
@@ -293,8 +306,41 @@ mod az_safe_send {
             Ok(())
         }
 
+        // See smart contract hub contract for testing
+        fn address_by_azero_id(&self, domain: String) -> Result<AccountId> {
+            const GET_ADDRESS_SELECTOR: [u8; 4] = ink::selector_bytes!("get_address");
+            let result = build_call::<Environment>()
+                .call(self.azero_id_router_address)
+                .exec_input(
+                    ExecutionInput::new(Selector::new(GET_ADDRESS_SELECTOR)).push_arg(domain),
+                )
+                .returns::<core::result::Result<AccountId, u8>>()
+                .params()
+                .invoke();
+            // Use the result as per the need
+            if let Ok(address) = result {
+                Ok(address)
+            } else {
+                Err(AzSafeSendError::NotFound("Domain".to_string()))
+            }
+        }
+
         fn emit_event<EE: EmitEvent<Self>>(emitter: EE, event: Event) {
             emitter.emit_event(event);
+        }
+
+        fn validate_ownership_of_azero_id(
+            &self,
+            azero_id: String,
+            address: AccountId,
+        ) -> Result<()> {
+            if address != self.address_by_azero_id(azero_id)? {
+                return Err(AzSafeSendError::UnprocessableEntity(
+                    "Domain does not belong to address".to_string(),
+                ));
+            }
+
+            Ok(())
         }
     }
 
@@ -316,6 +362,11 @@ mod az_safe_send {
             accounts.alice
         }
 
+        fn mock_azero_id_router_address() -> AccountId {
+            let accounts: DefaultAccounts<DefaultEnvironment> = default_accounts();
+            accounts.django
+        }
+
         fn get_balance(account_id: AccountId) -> Balance {
             ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(account_id)
                 .expect("Cannot get account balance")
@@ -328,7 +379,7 @@ mod az_safe_send {
         fn init() -> (DefaultAccounts<DefaultEnvironment>, AzSafeSend) {
             let accounts = default_accounts();
             set_caller::<DefaultEnvironment>(admin());
-            let safe_send = AzSafeSend::new(MOCK_FEE);
+            let safe_send = AzSafeSend::new(MOCK_FEE, mock_azero_id_router_address());
             (accounts, safe_send)
         }
 
@@ -345,6 +396,10 @@ mod az_safe_send {
             // * it returns the config
             assert_eq!(config.admin, admin());
             assert_eq!(config.fee, MOCK_FEE);
+            assert_eq!(
+                config.azero_id_router_address,
+                mock_azero_id_router_address()
+            );
         }
 
         // === TEST HANDLES ===
@@ -360,7 +415,7 @@ mod az_safe_send {
                 MOCK_FEE + MOCK_AMOUNT,
             );
             let mut cheque: Cheque = az_safe_send
-                .create(accounts.bob, MOCK_AMOUNT, None)
+                .create(accounts.bob, MOCK_AMOUNT, None, None)
                 .unwrap();
             // = when cheque doesn't belong to caller
             // = * it raises an error
@@ -433,7 +488,7 @@ mod az_safe_send {
                 MOCK_FEE + MOCK_AMOUNT,
             );
             let mut cheque: Cheque = az_safe_send
-                .create(accounts.bob, MOCK_AMOUNT, None)
+                .create(accounts.bob, MOCK_AMOUNT, None, None)
                 .unwrap();
             // = when cheque's to isn't the caller
             // = * it raises an error
@@ -485,7 +540,7 @@ mod az_safe_send {
             let (accounts, mut az_safe_send) = init();
             // when sender and receiver are the same
             // * it raises an error
-            let mut result = az_safe_send.create(admin(), 1, Some(token_address()));
+            let mut result = az_safe_send.create(admin(), 1, Some(token_address()), None);
             assert_eq!(
                 result,
                 Err(AzSafeSendError::UnprocessableEntity(
@@ -495,7 +550,7 @@ mod az_safe_send {
             // when sender and receiver are different
             // = when amount is zero
             // = * it raises an error
-            result = az_safe_send.create(accounts.bob, 0, Some(token_address()));
+            result = az_safe_send.create(accounts.bob, 0, Some(token_address()), None);
             assert_eq!(
                 result,
                 Err(AzSafeSendError::UnprocessableEntity(
@@ -509,14 +564,14 @@ mod az_safe_send {
             let amount: Balance = 1;
             ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(az_safe_send.fee);
             // ==== * it raises an error
-            result = az_safe_send.create(accounts.bob, amount, None);
+            result = az_safe_send.create(accounts.bob, amount, None, None);
             assert_eq!(result, Err(AzSafeSendError::IncorrectFee));
             // ==== when fee is correct
             ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(
                 az_safe_send.fee + amount,
             );
             // ==== * it stores the submitter as the caller
-            result = az_safe_send.create(accounts.bob, amount, None);
+            result = az_safe_send.create(accounts.bob, amount, None, None);
             let result_unwrapped = result.unwrap();
             // ==== * it increases the cheque length by 1
             assert_eq!(az_safe_send.cheques_total, u32::MAX);
@@ -538,7 +593,7 @@ mod az_safe_send {
                 az_safe_send.cheques.get(result_unwrapped.id).unwrap()
             );
             // == when new cheque id will be greater than u32::MAX
-            result = az_safe_send.create(accounts.bob, 1, Some(token_address()));
+            result = az_safe_send.create(accounts.bob, 1, Some(token_address()), None);
             assert_eq!(
                 result,
                 Err(AzSafeSendError::RecordsLimitReached("Cheque".to_string()))
@@ -584,6 +639,11 @@ mod az_safe_send {
                 .expect("account keyring has a valid account id")
         }
 
+        fn mock_azero_id_router_address(k: Keypair) -> AccountId {
+            AccountId::try_from(k.public_key().to_account_id().as_ref())
+                .expect("account keyring has a valid account id")
+        }
+
         // === TEST HANDLES ===
         // This is just to test when cheque has a token address associated with it
         #[ink_e2e::test]
@@ -604,7 +664,10 @@ mod az_safe_send {
                 .expect("Reward token instantiate failed")
                 .account_id;
             // Instantiate safe send smart contract
-            let safe_send_constructor = AzSafeSendRef::new(1_000_000_000_000);
+            let safe_send_constructor = AzSafeSendRef::new(
+                1_000_000_000_000,
+                mock_azero_id_router_address(ink_e2e::charlie()),
+            );
             let safe_send_id: AccountId = client
                 .instantiate(
                     "az_safe_send",
@@ -625,7 +688,7 @@ mod az_safe_send {
                 .expect("increase allowance failed");
             let create_message =
                 build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
-                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id))
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None)
                 });
             client
                 .call(&ink_e2e::alice(), create_message, 1_000_000_000_000, None)
@@ -671,7 +734,8 @@ mod az_safe_send {
                 .expect("Reward token instantiate failed")
                 .account_id;
             // Instantiate safe send smart contract
-            let safe_send_constructor = AzSafeSendRef::new(MOCK_FEE);
+            let safe_send_constructor =
+                AzSafeSendRef::new(MOCK_FEE, mock_azero_id_router_address(ink_e2e::charlie()));
             let safe_send_id: AccountId = client
                 .instantiate(
                     "az_safe_send",
@@ -694,7 +758,7 @@ mod az_safe_send {
                 .expect("increase allowance failed");
             let create_message =
                 build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
-                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id))
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None)
                 });
             client
                 .call(&ink_e2e::alice(), create_message, MOCK_FEE, None)
@@ -737,7 +801,8 @@ mod az_safe_send {
                 .expect("Reward token instantiate failed")
                 .account_id;
             // Instantiate safe send smart contract
-            let safe_send_constructor = AzSafeSendRef::new(MOCK_FEE);
+            let safe_send_constructor =
+                AzSafeSendRef::new(MOCK_FEE, mock_azero_id_router_address(ink_e2e::charlie()));
             let safe_send_id: AccountId = client
                 .instantiate(
                     "az_safe_send",
@@ -753,7 +818,7 @@ mod az_safe_send {
             // = when fee is incorrect
             // * it raises an error
             let create_message = build_message::<AzSafeSendRef>(safe_send_id)
-                .call(|safe_send| safe_send.create(bob_account_id, 1, Some(token_id)));
+                .call(|safe_send| safe_send.create(bob_account_id, 1, Some(token_id), None));
             let result = client
                 .call_dry_run(&ink_e2e::alice(), &create_message, 0, None)
                 .await
@@ -769,7 +834,7 @@ mod az_safe_send {
                 .expect("increase allowance failed");
             let create_message =
                 build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
-                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id))
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None)
                 });
             client
                 .call(&ink_e2e::alice(), create_message, MOCK_FEE, None)
