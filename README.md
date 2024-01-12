@@ -53,5 +53,6 @@ substrate-contracts-node --dev
 
 ## References
 
-- [INK Multi-Contract-Caller Example](https://github.com/paritytech/ink-examples/tree/61f69a77b3e32fe18c1f144a2863d25471778bee/multi-contract-caller)
-- [ink_e2e Docs](https://docs.rs/ink_e2e/4.3.0/ink_e2e/index.html)
+1. https://github.com/btn-group/safe_send
+2. https://github.com/btn-group/az_safe_send
+3. https://github.com/btn-group/squid_safe_send
