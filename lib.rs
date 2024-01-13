@@ -32,6 +32,7 @@ mod az_safe_send {
         amount: Balance,
         token_address: Option<AccountId>,
         fee: Balance,
+        memo: Option<String>,
     }
 
     #[ink(event)]
@@ -65,6 +66,7 @@ mod az_safe_send {
         token_address: Option<AccountId>,
         status: u8,
         fee: Balance,
+        memo: Option<String>,
     }
 
     #[derive(Debug, Clone, scale::Encode, scale::Decode)]
@@ -220,6 +222,7 @@ mod az_safe_send {
             amount: Balance,
             token_address: Option<AccountId>,
             azero_id: Option<String>,
+            memo: Option<String>,
         ) -> Result<Cheque> {
             let caller: AccountId = Self::env().caller();
             if caller == to {
@@ -263,6 +266,7 @@ mod az_safe_send {
                 token_address,
                 status: 0,
                 fee: self.fee,
+                memo,
             };
             self.cheques.insert(self.cheques_total, &cheque);
             self.cheques_total += 1;
@@ -277,6 +281,7 @@ mod az_safe_send {
                     amount: cheque.amount,
                     token_address: cheque.token_address,
                     fee: cheque.fee,
+                    memo: cheque.memo.clone(),
                 }),
             );
 
@@ -415,7 +420,7 @@ mod az_safe_send {
                 MOCK_FEE + MOCK_AMOUNT,
             );
             let mut cheque: Cheque = az_safe_send
-                .create(accounts.bob, MOCK_AMOUNT, None, None)
+                .create(accounts.bob, MOCK_AMOUNT, None, None, None)
                 .unwrap();
             // = when cheque doesn't belong to caller
             // = * it raises an error
@@ -488,7 +493,7 @@ mod az_safe_send {
                 MOCK_FEE + MOCK_AMOUNT,
             );
             let mut cheque: Cheque = az_safe_send
-                .create(accounts.bob, MOCK_AMOUNT, None, None)
+                .create(accounts.bob, MOCK_AMOUNT, None, None, None)
                 .unwrap();
             // = when cheque's to isn't the caller
             // = * it raises an error
@@ -538,9 +543,10 @@ mod az_safe_send {
         #[ink::test]
         fn test_create() {
             let (accounts, mut az_safe_send) = init();
+            let memo = Some("345123".to_string());
             // when sender and receiver are the same
             // * it raises an error
-            let mut result = az_safe_send.create(admin(), 1, Some(token_address()), None);
+            let mut result = az_safe_send.create(admin(), 1, Some(token_address()), None, None);
             assert_eq!(
                 result,
                 Err(AzSafeSendError::UnprocessableEntity(
@@ -550,7 +556,7 @@ mod az_safe_send {
             // when sender and receiver are different
             // = when amount is zero
             // = * it raises an error
-            result = az_safe_send.create(accounts.bob, 0, Some(token_address()), None);
+            result = az_safe_send.create(accounts.bob, 0, Some(token_address()), None, None);
             assert_eq!(
                 result,
                 Err(AzSafeSendError::UnprocessableEntity(
@@ -564,14 +570,14 @@ mod az_safe_send {
             let amount: Balance = 1;
             ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(az_safe_send.fee);
             // ==== * it raises an error
-            result = az_safe_send.create(accounts.bob, amount, None, None);
+            result = az_safe_send.create(accounts.bob, amount, None, None, None);
             assert_eq!(result, Err(AzSafeSendError::IncorrectFee));
             // ==== when fee is correct
             ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(
                 az_safe_send.fee + amount,
             );
             // ==== * it stores the submitter as the caller
-            result = az_safe_send.create(accounts.bob, amount, None, None);
+            result = az_safe_send.create(accounts.bob, amount, None, None, memo.clone());
             let result_unwrapped = result.unwrap();
             // ==== * it increases the cheque length by 1
             assert_eq!(az_safe_send.cheques_total, u32::MAX);
@@ -587,13 +593,15 @@ mod az_safe_send {
             assert_eq!(result_unwrapped.status, 0);
             // ==== * it stores the submitted token_address
             assert_eq!(result_unwrapped.token_address, None);
+            // ==== * it stores the submitted memo
+            assert_eq!(result_unwrapped.memo, memo);
             // ==== * it stores the transaction
             assert_eq!(
                 result_unwrapped,
                 az_safe_send.cheques.get(result_unwrapped.id).unwrap()
             );
             // == when new cheque id will be greater than u32::MAX
-            result = az_safe_send.create(accounts.bob, 1, Some(token_address()), None);
+            result = az_safe_send.create(accounts.bob, 1, Some(token_address()), None, None);
             assert_eq!(
                 result,
                 Err(AzSafeSendError::RecordsLimitReached("Cheque".to_string()))
@@ -688,7 +696,7 @@ mod az_safe_send {
                 .expect("increase allowance failed");
             let create_message =
                 build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
-                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None)
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None, None)
                 });
             client
                 .call(&ink_e2e::alice(), create_message, 1_000_000_000_000, None)
@@ -758,7 +766,7 @@ mod az_safe_send {
                 .expect("increase allowance failed");
             let create_message =
                 build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
-                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None)
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None, None)
                 });
             client
                 .call(&ink_e2e::alice(), create_message, MOCK_FEE, None)
@@ -818,7 +826,7 @@ mod az_safe_send {
             // = when fee is incorrect
             // * it raises an error
             let create_message = build_message::<AzSafeSendRef>(safe_send_id)
-                .call(|safe_send| safe_send.create(bob_account_id, 1, Some(token_id), None));
+                .call(|safe_send| safe_send.create(bob_account_id, 1, Some(token_id), None, None));
             let result = client
                 .call_dry_run(&ink_e2e::alice(), &create_message, 0, None)
                 .await
@@ -834,7 +842,7 @@ mod az_safe_send {
                 .expect("increase allowance failed");
             let create_message =
                 build_message::<AzSafeSendRef>(safe_send_id.clone()).call(|safe_send| {
-                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None)
+                    safe_send.create(bob_account_id, MOCK_SEND_AMOUNT, Some(token_id), None, None)
                 });
             client
                 .call(&ink_e2e::alice(), create_message, MOCK_FEE, None)
