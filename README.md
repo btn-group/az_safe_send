@@ -1,8 +1,6 @@
 # AZ Safe Send
 
-Safely send crypto via an allowance/collect mechanism on Aleph Zero.
-
-### Rules & notes
+A smart contract for Aleph Zero that enables the safe sending of crypto via a decentralised chequeing (send/collect) system. Also integrates AZERO.ID to provide an optional, extra check by validating that the receiver's wallet address matches a provided AZERO.ID.
 
 ## Getting Started
 ### Prerequisites
