@@ -33,6 +33,8 @@ mod az_safe_send {
         token_address: Option<AccountId>,
         fee: Balance,
         memo: Option<String>,
+        recipient_azero_id: Option<String>,
+        sender_azero_id: Option<String>,
     }
 
     #[ink(event)]
@@ -231,10 +233,10 @@ mod az_safe_send {
                     "Sender and receiver must be different.".to_string(),
                 ));
             }
-            if let Some(recipient_azero_id_unwrapped) = recipient_azero_id {
+            if let Some(recipient_azero_id_unwrapped) = recipient_azero_id.clone() {
                 self.validate_ownership_of_azero_id(recipient_azero_id_unwrapped, to)?;
             }
-            if let Some(sender_azero_id_unwrapped) = sender_azero_id {
+            if let Some(sender_azero_id_unwrapped) = sender_azero_id.clone() {
                 self.validate_ownership_of_azero_id(sender_azero_id_unwrapped, caller)?;
             }
             if amount == 0 {
@@ -286,6 +288,8 @@ mod az_safe_send {
                     token_address: cheque.token_address,
                     fee: cheque.fee,
                     memo: cheque.memo.clone(),
+                    recipient_azero_id,
+                    sender_azero_id,
                 }),
             );
 
